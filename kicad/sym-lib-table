@@ -1,0 +1,4 @@
+(sym_lib_table
+  (lib (name MCU_RaspberryPi_and_Boards)(type Legacy)(uri ${KIPRJMOD}/Library/PiPico/MCU_RaspberryPi_and_Boards.lib)(options "")(descr ""))
+  (lib (name ClockRadio)(type Legacy)(uri ${KIPRJMOD}/Library/ClockRadio.lib)(options "")(descr ""))
+)
