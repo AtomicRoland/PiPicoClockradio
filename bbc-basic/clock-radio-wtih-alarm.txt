@@ -1,0 +1,552 @@
+   10 REM Pi Pico Clock Radio V2.0
+   20 REM (c) ROLAND LEURS 12 November 2023
+   30 :
+   40 REM Settings
+   50 clockPin% = 0
+   60 dataPin% = 1
+   70 brightness% = 8 : REM display brightness (automatic)
+   80 volume% = 0 : REM Radio volume
+   90 PIN_BUTTON%=20
+  100 PIN_SDA%=4
+  110 PIN_SCL%=5
+  120 PIN_BUTTON%=20
+  130 ADDRESS%=&20 : REM actual address is &10
+  140 FREQ=87 : REM default frequency
+  150 temp% = 0 : REM temperature
+  160 keytimer%=0 : REM Inactivity timer
+  170 ALARMTIME% = 0 : REM Alarm time
+  180 temptime% = 0    : REM Last temperature measure
+  190 radiostatus% = 0 : REM Radio (0 = off, 1 = on)
+  200 alarmstatus% = 0 : REM Alarm (0 = off, 1 = on)
+  210 snoozable% = 0   : REM Can snooze (0 = off, 1 = on)
+  220 snoozetime% = -100    : REM No snooze active
+  225 sleeptime% = -100     : REM No sleep active
+  230 mode% = 0 : REM Mode (Set clock, radio, alarm etc)
+  240 configlength%=12
+  250 DIM radio(configlength%) : REM radio read back
+  260 DIM config(configlength%) : REM register configuration
+  270 config(0)=&C1:config(1)=&03:REM register &02
+  280 config(2)=&00:config(3)=&00:REM register &03
+  290 config(4)=&0A:config(5)=&00:REM register &04
+  300 config(6)=&88:config(7)=&0F:REM register &05
+  310 config(8)=&00:config(9)=&00:REM register &06
+  320 config(10)=&42:config(11)=&02:REM register &07
+  330 dp% = 0
+  340 DIM digits(24)
+  350 DIM data(4)
+  360 DATA &3F,&06,&5B,&4F,&66,&6D,&7D,&07
+  370 DATA &7F,&6F,&77,&7C,&39,&5E,&79,&71,&00
+  380 DATA &78,&77,&38,&7C,&71,&39,&63,&50 : REM t A L d F C o r
+  390 FOR i%=0 TO 24
+  400   READ d%
+  410   digits(i%) = d%
+  420 NEXT i%
+  430 :
+  440 REM Main program
+  450 PROCinit(clockPin%, dataPin%)
+  460 PROCi2c_init(PIN_SDA%, PIN_SCL%)
+  470 PROCinit_leds
+  480 PROCradio_init
+  490 PROCload_freq
+  500 PROCradio_freq(FREQ)
+  510 PROCradio_off
+  520 :
+  530 DISPLAY%=0 : REM 0 = TIME, 1 = ALARM TIME, 2 = LOUDNESS (VOLUME), 3 = BRIGHTNESS, 4 = FREQUENCY, 5 = TEMP, 6 = CAROUSSEL, 7 = MODE
+  540 REPEAT
+  550   BUTTONS% = FNread_buttons
+  560   IF DISPLAY% =0 AND TIME MOD 200 > 100 THEN PROCsetdoublepointon ELSE PROCsetdoublepointoff    
+  570   IF DISPLAY% =2 PROCsetdoublepointon
+  580   REM DISPLAY TEMPERATURE (mode%=&10)
+  590   IF (BUTTONS% AND &18) > &00 AND mode%=&10 THEN DISPLAY%=0:mode%=0 : REM DISPLAY TIME AGAIN
+  600   REM SET TIME (mode%=&20)
+  610   IF (BUTTONS% AND &10) = &10 AND mode%=&20 THEN TIME=TIME+6000:DISPLAY%=0
+  620   IF (BUTTONS% AND &08) = &08 AND mode%=&20 THEN TIME=TIME+360000:DISPLAY%=0
+  630   REM SET ALARM TIME (mode%=&30)
+  640   IF (BUTTONS% AND &10) = &10 AND mode%=&30 THEN ALARMTIME%=ALARMTIME%+6000:DISPLAY%=1
+  650   IF (BUTTONS% AND &08) = &08 AND mode%=&30 THEN ALARMTIME%=ALARMTIME%+360000:DISPLAY%=1
+  660   REM SET VOLUME (mode%=&40)
+  670   IF (BUTTONS% AND &10) = &10 AND mode%=&40 AND volume% < 15 THEN volume%=volume%+1:DISPLAY%=2:PROCradio_vol(volume%)
+  680   IF (BUTTONS% AND &08) = &08 AND mode%=&40 AND volume% > 0 THEN volume%=volume%-1:DISPLAY%=2:PROCradio_vol(volume%)
+  690   REM SET BRIGHTNESS (mode%=&50)
+  700   IF (BUTTONS% AND &10) = &10 AND mode%=&50 AND brightness% < 8 THEN brightness%=brightness%+1:DISPLAY%=3
+  710   IF (BUTTONS% AND &08) = &08 AND mode%=&50 AND brightness% > 0 THEN brightness%=brightness%-1:DISPLAY%=3
+  720   REM SET FREQUENCY (mode%=&60)
+  730   IF (BUTTONS% AND &10) = &10 AND mode%=&60 AND radiostatus% = 1 THEN PROCradio_seek(1):DISPLAY%=4
+  740   IF (BUTTONS% AND &08) = &08 AND mode%=&60 AND radiostatus% = 1 THEN PROCradio_seek(0):DISPLAY%=4
+  750   REM SET MODE
+  760   IF (BUTTONS% AND &04) = &04 THEN PROCsetmode
+  770   IF (DISPLAY%=0) THEN PROCtime_to_data
+  780   IF (DISPLAY%=1) THEN PROCalarm_to_data:PROCsetdoublepointon
+  790   IF (DISPLAY%=2) THEN PROCloud_to_data:PROCsetdoublepointoff
+  800   IF (DISPLAY%=3) THEN PROCbright_to_data:PROCsetdoublepointoff
+  810   IF (DISPLAY%=4) THEN PROCfreq_to_data:PROCsetdoublepointoff
+  820   IF (DISPLAY%=5) THEN PROCtemp_to_data:PROCsetdoublepointoff
+  830   IF (DISPLAY%=6) THEN PROCcaroussel
+  840   PROCshow
+  850   REM TOGGLE ALARM AND RADIO
+  860   IF (BUTTONS% AND &01) = &01 THEN PROCtoggle_alarm
+  870   IF (BUTTONS% AND &02) = &02 THEN PROCtoggle_radio
+  880   IF BUTTONS% > 0 THEN PROCdelay(50):keytimer%=TIME
+  890   IF TIME-keytimer% > 1500 AND DISPLAY% <> 6 THEN DISPLAY%=0 : mode%=0 : REM After 15 seconds inactivity return to time display
+  900   IF alarmstatus%=1 AND ALARMTIME% DIV 100 = TIME DIV 100 THEN radiostatus%=1:PROCradio_on:snoozable%=1
+  910   IF alarmstatus%=1 AND snoozetime% DIV 100 = TIME DIV 100 THEN radiostatus%=1:PROCradio_on:snoozable%=1
+  920   IF radiostatus%=1 AND sleeptime% DIV 100 = TIME DIV 100 THEN radiostatus%=0:PROCradio_off:sleeptime%=-100
+  930 UNTIL FALSE
+  940 : 
+  950 REM API CALLS display:
+  960 REM PROCinit - Initialize the driver and display
+  970 REM PROCshow - shows the hex digits in the data array
+  980 REM PROCclear - turns off all digits
+  990 REM PROCsetbrightness - sets the brightness of the displays
+ 1000 REM PROCsetdoublepointon - turns double point on
+ 1010 REM PROCsetdoublepointoff - turns double point off
+ 1020 :
+ 1030 REM API CALLS I2C:
+ 1040 REM PROCi2c_init - Initialize the ports
+ 1050 REM PROCi2c_start - Send start bit
+ 1060 REM PROCi2c_stop - Send stop bit
+ 1070 REM PROCi2c_send - Send a byte
+ 1080 REM PROCi2c_read - Read a byte
+ 1090 REM PROCi2c_ack - Send an acknowledge
+ 1100 REM PROCi2c_get_ack - Wait for acknowledge
+ 1110 :
+ 1120 REM API CALLS radio:
+ 1130 REM PROCradio_init - initialize the radio (write config-array)
+ 1140 REM PROCradio_tune - tune radio to specified channel
+ 1150 REM PROCradio_freq - tune radio to specified fequency
+ 1160 REM PROCradio_read - read radio status info radio-array
+ 1170 REM PROCradio_seek - seek the next or previous channel
+ 1180 REM PROCradio_vol  - set volume
+ 1190 :
+ 1200 REM Miscellaneous calls
+ 1210 REM PROCdelay - short delay
+ 1220 REM PROCtime_to_data - write time to data%-array
+ 1230 REM PROCread_buttons - read the button status
+ 1240 :
+ 1250 DEFPROCinit(c%,d%)
+ 1260 SYS "gpio_init", c%
+ 1270 SYS "gpio_init", d%
+ 1280 PROCsetdatahigh
+ 1290 PROCsetclockhigh
+ 1300 PROCsetclockpinout
+ 1310 PROCsetdatapinout
+ 1320 PROCclear
+ 1330 ENDPROC
+ 1340 :
+ 1350 DEFPROCsetclockpinout
+ 1360 SYS "gpio_set_dir", clockPin%, 1
+ 1370 ENDPROC
+ 1380 :
+ 1390 DEFPROCsetdatapinout
+ 1400 SYS "gpio_set_dir", dataPin%, 1
+ 1410 ENDPROC
+ 1420 :
+ 1430 DEFPROCsetdatapinin
+ 1440 SYS "gpio_set_dir", dataPin%, 0
+ 1450 ENDPROC
+ 1460 :
+ 1470 DEFPROCsetclockhigh
+ 1480 SYS "gpio_put", clockPin%, 1
+ 1490 ENDPROC
+ 1500 :
+ 1510 DEFPROCsetclocklo
+ 1520 SYS "gpio_put", clockPin%, 0
+ 1530 ENDPROC
+ 1540 :
+ 1550 DEFPROCsetdatahigh
+ 1560 SYS "gpio_put", dataPin%, 1
+ 1570 ENDPROC
+ 1580 :
+ 1590 DEFPROCsetdatalo
+ 1600 SYS "gpio_put", dataPin%, 0
+ 1610 ENDPROC
+ 1620 :
+ 1630 DEFPROCsendstartbit
+ 1640 PROCsetclockhigh
+ 1650 PROCsetdatahigh
+ 1660 PROCsetdatalo
+ 1670 PROCsetclocklo
+ 1680 ENDPROC
+ 1690 :
+ 1700 DEFPROCsendstopbit
+ 1710 PROCsetclocklo
+ 1720 PROCsetdatalo
+ 1730 PROCsetclockhigh
+ 1740 PROCsetdatahigh
+ 1750 ENDPROC
+ 1760 :
+ 1770 DEFPROCwrite(byte%)
+ 1780 REM Send data bits
+ 1790 FOR i%=1 TO 8
+ 1800   PROCsetclocklo
+ 1810   IF byte% MOD 2 = 1 THEN
+ 1820     PROCsetdatahigh
+ 1830   ELSE
+ 1840     PROCsetdatalo
+ 1850   ENDIF
+ 1860   PROCsetclockhigh
+ 1870   byte% = byte%/2
+ 1880 NEXT i%
+ 1890 REM Wait for acknowledge
+ 1900 PROCsetclocklo
+ 1910 PROCsetclockhigh
+ 1920 PROCsetdatapinin
+ 1930 REPEAT SYS "gpio_get", dataPin% TO v%: UNTIL v%=0
+ 1940 PROCsetdatapinout
+ 1950 ENDPROC
+ 1960 :
+ 1970 DEFPROCshow
+ 1980 PROCsendstartbit
+ 1990 PROCwrite(&40)
+ 2000 PROCsendstopbit
+ 2010 PROCsendstartbit
+ 2020 PROCwrite(&C0)
+ 2030 FOR j%=0 TO 3
+ 2040   byte%=digits(data(j%))
+ 2050   PROCwrite(byte% OR dp%)
+ 2060 NEXT j%
+ 2070 PROCsendstopbit
+ 2080 PROCsendstartbit
+ 2090 hour%=TIME DIV 360000
+ 2100 IF brightness%<8 THEN PROCwrite(brightness%+&88)
+ 2110 IF brightness%=8 AND hour% >= 9 AND hour% < 21 THEN PROCwrite(&8F)
+ 2120 IF brightness%=8 AND (hour% < 9 OR hour% >= 21) THEN PROCwrite(&88)
+ 2130 PROCsendstopbit
+ 2140 ENDPROC
+ 2150 :
+ 2160 DEFPROCclear
+ 2170 FOR j%=0 TO 3
+ 2180   data(j%)=&10
+ 2190 NEXT j%
+ 2200 PROCshow
+ 2210 ENDPROC
+ 2220 :
+ 2230 DEFPROCsetdoublepointon
+ 2240 dp%=&80
+ 2250 ENDPROC
+ 2260 :
+ 2270 DEFPROCsetdoublepointoff
+ 2280 dp%=0
+ 2290 ENDPROC
+ 2300 :
+ 2310 REM I2C Library 
+ 2320 REM inspired by https://circuitdigest.com/microcontroller-projects/arduino-fm-radio-using-rda5807
+ 2330 :
+ 2340 DEFPROCi2c_init(c%,d%)
+ 2350 SYS "gpio_init", c%
+ 2360 SYS "gpio_init", d%
+ 2370 SYS "gpio_put", PIN_SCL%, 1
+ 2380 SYS "gpio_put", PIN_SDA%, 1
+ 2390 SYS "gpio_pull_up", PIN_SDA%
+ 2400 SYS "gpio_pull_up", PIN_SCL%
+ 2410 ENDPROC
+ 2420 :
+ 2430 DEFPROCset_scl_in
+ 2440 SYS "gpio_set_dir", PIN_SCL%, 0
+ 2450 ENDPROC
+ 2460 :
+ 2470 DEFPROCset_scl_out
+ 2480 SYS "gpio_set_dir", PIN_SCL%, 1
+ 2490 ENDPROC
+ 2500 :
+ 2510 DEFPROCset_sda_out
+ 2520 SYS "gpio_set_dir", PIN_SDA%, 1
+ 2530 ENDPROC
+ 2540 :
+ 2550 DEFPROCset_sda_in
+ 2560 SYS "gpio_set_dir", PIN_SDA%, 0
+ 2570 ENDPROC
+ 2580 :
+ 2590 DEFPROCset_scl_on
+ 2600 PROCset_scl_in
+ 2610 ENDPROC
+ 2620 :
+ 2630 DEFPROCset_scl_off
+ 2640 PROCset_scl_out
+ 2650 SYS "gpio_put", PIN_SCL%, 0
+ 2660 ENDPROC
+ 2670 :
+ 2680 DEFPROCset_sda_on
+ 2690 PROCset_sda_in
+ 2700 ENDPROC
+ 2710 :
+ 2720 DEFPROCset_sda_off
+ 2730 PROCset_sda_out
+ 2740 SYS "gpio_put", PIN_SDA%, 0
+ 2750 ENDPROC
+ 2760 :
+ 2770 DEFPROCi2c_start
+ 2780 PROCset_sda_off
+ 2790 PROCset_scl_off
+ 2800 ENDPROC
+ 2810 :
+ 2820 DEFPROCi2c_stop
+ 2830 PROCset_sda_off
+ 2840 PROCset_scl_on
+ 2850 PROCset_sda_on
+ 2860 ENDPROC
+ 2870 :
+ 2880 DEFPROCi2c_send(data%)
+ 2890 data%=data% AND &FF
+ 2900 FOR i1%=0 TO 7
+ 2910   IF data% AND &80 THEN PROCset_sda_on ELSE PROCset_sda_off
+ 2920   PROCset_scl_on
+ 2930   data%=(data%*2) AND &FF
+ 2940   PROCset_scl_off
+ 2950 NEXT i1%
+ 2960 PROCi2c_get_ack
+ 2970 ENDPROC
+ 2980 :
+ 2990 DEFFNi2c_read
+ 3000 data%=0
+ 3010 PROCset_sda_in
+ 3020 FOR i6%=0 TO 7
+ 3030   PROCset_scl_off
+ 3040   PROCset_scl_on
+ 3050   SYS "gpio_get", PIN_SDA% TO bit%
+ 3060   data%=2*data% + bit%
+ 3070 NEXT i6%
+ 3080 PROCi2c_ack
+ 3090 =data%
+ 3100 ENDFN
+ 3110 :
+ 3120 REM Radio RDA5807 Library
+ 3130 DEFPROCradio_init
+ 3140 PROCi2c_start
+ 3150 PROCi2c_send(ADDRESS%)
+ 3160 FOR i3%=0 TO configlength%-1
+ 3170   PROCi2c_send(config(i3%))
+ 3180 NEXT i3%
+ 3190 PROCi2c_stop
+ 3200 ENDPROC
+ 3210 :
+ 3220 DEFPROCradio_on
+ 3230 PROCload_freq
+ 3240 PROCradio_vol(volume%)
+ 3250 PROCradio_freq(FREQ)
+ 3260 PROCset_led(2,1)
+ 3270 ENDPROC
+ 3280 :
+ 3290 DEFPROCradio_off
+ 3300 PROCsave_freq
+ 3310 PROCradio_vol(0)
+ 3320 PROCset_led(2,0)
+ 3330 ENDPROC
+ 3340 :
+ 3350 DEFPROCradio_tune(channel%)
+ 3360 PROCi2c_start
+ 3370 PROCi2c_send(ADDRESS%)
+ 3380 PROCi2c_send(&C0):PROCi2c_send(&01): REM register 0x02
+ 3390 PROCi2c_send(channel%/4):PROCi2c_send((channel%*&40) OR &10)
+ 3400 PROCi2c_stop
+ 3410 PROCdelay(100)
+ 3420 PROCradio_read
+ 3430 ENDPROC
+ 3440 :
+ 3450 DEFPROCradio_freq(mhz)
+ 3460 PROCradio_tune(10*mhz-870)
+ 3470 ENDPROC
+ 3480 :
+ 3490 DEFPROCi2c_get_ack
+ 3500 PROCset_sda_in
+ 3510 PROCset_scl_on
+ 3520 REPEAT SYS "gpio_get", PIN_SDA% TO bit%
+ 3530 UNTIL bit%=0
+ 3540 PROCset_scl_off
+ 3550 PROCset_sda_out
+ 3560 PROCset_sda_on
+ 3570 ENDPROC
+ 3580 :
+ 3590 DEFPROCradio_seek(dir%)
+ 3600 seek%=(config(0)*256+config(1)) AND &FC7D
+ 3610 dir%=dir%*&200 + &100
+ 3620 seek%=seek% OR dir%
+ 3630 PROCset_led(1,0) : REM stereo led off
+ 3640 PROCi2c_start
+ 3650 PROCi2c_send(ADDRESS%)
+ 3660 PROCi2c_send(seek% / 256):PROCi2c_send(seek%)
+ 3670 PROCi2c_stop
+ 3680 PROCdelay(50)
+ 3690 REPEAT
+ 3700   PROCdelay(50)
+ 3710   PROCradio_read
+ 3720 UNTIL radio(0) AND &40 = &40
+ 3730 FREQ=87.0 + ((radio(0) AND &03) + radio(1)) * 0.1
+ 3740 PROCsave_freq
+ 3750 ENDPROC
+ 3760 :
+ 3770 DEFPROCradio_read
+ 3780 PROCi2c_start
+ 3790 PROCi2c_send(ADDRESS%+1) : REM +1 indicates read
+ 3800 FOR i5%=0 TO configlength%-1 : REM reads register &0A to &0F
+ 3810   data%=FNi2c_read
+ 3820   radio(i5%)=data%
+ 3830 NEXT i5%
+ 3840 PROCi2c_stop
+ 3850 ENDPROC
+ 3860 :
+ 3870 DEFPROCradio_vol(volume%)
+ 3880 PROCi2c_start
+ 3890 PROCi2c_send(ADDRESS%+2) : REM I use direct addressing here
+ 3900 PROCi2c_send(&05) : REM register address 
+ 3910 PROCi2c_send(&84) : REM high byte of data
+ 3920 PROCi2c_send(&D0+volume%) : REM low byte of data
+ 3930 PROCi2c_stop
+ 3940 ENDPROC 
+ 3950 :
+ 3960 DEFPROCi2c_ack
+ 3970 PROCset_scl_off
+ 3980 PROCset_sda_off
+ 3990 PROCset_scl_on
+ 4000 PROCset_scl_off
+ 4010 ENDPROC
+ 4020 :
+ 4030 DEFPROCdelay(delay%)
+ 4040 t%=TIME
+ 4050 REPEAT UNTIL TIME-t%>delay%
+ 4060 ENDPROC
+ 4070 :
+ 4080 DEFFNread_buttons
+ 4090 buttons%=7
+ 4100 FOR i4%=0 TO 4
+ 4110   SYS "gpio_get", PIN_BUTTON%-i4% TO bit%
+ 4120   buttons%=buttons%*2 + bit%
+ 4130 NEXT i4%
+ 4140 buttons% = buttons% EOR &FF
+ 4150 =buttons%
+ 4160 ENDFN
+ 4170 :
+ 4180 DEFPROCtime_to_data
+ 4190 IF TIME>8640000 THEN TIME=TIME-8640000 : REM roll over to the next day
+ 4200 min%=TIME/6000 : REM = TIME / 100 / 60
+ 4210 hour%=min% DIV 60
+ 4220 min%=min% MOD 60
+ 4230 data(0)=hour% DIV 10:data(1)=hour% MOD 10
+ 4240 data(2)=min% DIV 10:data(3)=min% MOD 10
+ 4250 IF data(0)=0 THEN data(0) = 16
+ 4260 ENDPROC
+ 4270 :
+ 4280 DEFPROCfreq_to_data
+ 4290 data(0)=FREQ DIV 100:data(1)=(FREQ MOD 100)/10
+ 4300 data(2)=FREQ MOD 10:data(3)=(FREQ*10) MOD 10 
+ 4310 IF data(0)=0 THEN data(0) = 16
+ 4320 ENDPROC
+ 4330 :
+ 4340 DEFPROCsave_freq
+ 4350 F=OPENOUT "radio.cfg"
+ 4360 PRINT#F,FREQ
+ 4370 PRINT#F,volume%
+ 4380 CLOSE#F
+ 4390 ENDPROC
+ 4400 :
+ 4410 DEFPROCload_freq
+ 4420 F=OPENIN "radio.cfg"
+ 4430 IF F THEN INPUT#F,FREQ:INPUT#F,volume%:CLOSE#F
+ 4440 ENDPROC
+ 4450 :
+ 4460 REM LED control
+ 4470 DEFPROCinit_leds
+ 4480 FOR p%=10 TO 13
+ 4490   SYS "gpio_init", p%
+ 4500   SYS "gpio_set_dir", p%, 1
+ 4510   SYS "gpio_put", p%, 1
+ 4520 NEXT p%
+ 4530 ENDPROC
+ 4540 :
+ 4550 DEFPROCset_led(p%,b%)
+ 4560 SYS "gpio_put", p%+9, b% EOR 1 
+ 4570 ENDPROC
+ 4580 :
+ 4590 REM Led indicators
+ 4600 DEFPROCset_led_indicators
+ 4610 IF radio(0) AND &04 = &04 THEN PROCset_led(1,1) : REM stereo
+ 4620 rssi% = radio(2) / 4
+ 4630 IF rssi%>25 THEN PROCset_led(4,1) ELSE PROCset_led(4,0)
+ 4640 IF rssi%>20 THEN PROCset_led(3,1) ELSE PROCset_led(3,0)
+ 4650 IF rssi%>10 THEN PROCset_led(2,1) ELSE PROCset_led(2,0)
+ 4660 ENDPROC
+ 4670 :
+ 4680 DEFPROCloud_to_data
+ 4690 data(0)=16:data(1)=16
+ 4700 data(2)=volume% DIV 10
+ 4710 data(3)=volume% MOD 10
+ 4720 ENDPROC
+ 4730 :
+ 4740 DEFPROCbright_to_data
+ 4750 data(0)=16:data(1)=16:data(2)=16
+ 4760 IF brightness% < 8 THEN data(3)=brightness%
+ 4770 IF brightness% = 8 THEN data(3)=18
+ 4780 ENDPROC
+ 4790 :
+ 4800 DEFPROCalarm_to_data
+ 4810 IF ALARMTIME%>8640000 THEN ALARMTIME%=ALARMTIME%-8640000 : REM roll over to the next day
+ 4820 min%=ALARMTIME%/6000 : REM = ALARMTIME% / 100 / 60
+ 4830 hour%=min% DIV 60
+ 4840 min%=min% MOD 60
+ 4850 data(0)=hour% DIV 10:data(1)=hour% MOD 10
+ 4860 data(2)=min% DIV 10:data(3)=min% MOD 10
+ 4870 IF data(0)=0 THEN data(0) = 16
+ 4880 ENDPROC
+ 4890 :
+ 4900 DEFPROCsetmode
+ 4910 mode%=(mode%+&10) AND &F0:IF mode%=&80 THEN mode%=&00
+ 4920 IF radiostatus% = 0 AND mode%=&40 THEN mode%=&50
+ 4930 IF radiostatus% = 0 AND mode%=&60 THEN mode%=&70
+ 4940 data(0)=mode%/16+15:data(1)=16
+ 4950 data(2)=16:data(3)=16:DISPLAY% = 7
+ 4960 IF mode% = &00 THEN DISPLAY% = 0
+ 4970 IF mode% = &10 THEN DISPLAY% = 5
+ 4980 IF mode% = &70 THEN DISPLAY% = 6
+ 4990 ENDPROC
+ 5000 :
+ 5010 DEFPROCtoggle_alarm
+ 5020 toggle%=0
+ 5030 IF alarmstatus% = 1 AND snoozable% = 0 THEN PROCset_led(1,0):DISPLAY%=0 : toggle% = 1
+ 5040 IF alarmstatus% = 1 AND snoozable% = 1 THEN DISPLAY%=0 : snoozetime%=TIME+60000 : PROCradio_off : snoozable%=0 : toggle%=0
+ 5050 IF alarmstatus% = 0 THEN PROCset_led(1,1):DISPLAY%=1:toggle%=1
+ 5060 alarmstatus% = alarmstatus% EOR toggle%
+ 5070 IF snoozetime%>8640000 THEN snoozetime%=snoozetime%-8640000 : REM roll over to the next day
+ 5080 ENDPROC
+ 5090 :
+ 5100 DEFPROCtoggle_radio
+ 5110 IF radiostatus% = 1 THEN PROCradio_off:DISPLAY%=0:snoozetime%=-100:snoozable%=0
+ 5120 IF radiostatus% = 0 THEN PROCradio_on:DISPLAY%=4:tbp%=FNtime_button_pressed
+ 5130 radiostatus% = radiostatus% EOR 1
+ 5140 ENDPROC
+ 5150 :
+ 5160 DEFFNtemp
+ 5170 IF TIME-temptime% > 6000 THEN temp% = INT(23.5 - (3.3*ADVAL(5)/4096 - 0.706) / 0.00172):temptime% = TIME
+ 5180 =temp%
+ 5190 ENDFN
+ 5200 :
+ 5210 DEFPROCtemp_to_data
+ 5220 t%=FNtemp
+ 5230 IF t% DIV 10 >= 1 THEN data(0)=t% DIV 10
+ 5240 ELSE data(0)=16
+ 5250 ENDIF
+ 5260 data(1) = t% MOD 10
+ 5270 data(2) = 23 : data(3) = 22
+ 5280 ENDPROC
+ 5290 :
+ 5300 DEFPROCcaroussel
+ 5310 t% = TIME MOD 6000
+ 5320 IF t% < 2000 THEN PROCtime_to_data:PROCsetdoublepointon
+ 5330 IF t% >= 2000 AND t% < 4000 THEN IF radiostatus% = 1 THEN PROCfreq_to_data ELSE PROCtime_to_data:PROCsetdoublepointon : ENDIF
+ 5340 IF t% >= 4000 THEN PROCtemp_to_data:PROCsetdoublepointoff
+ 5350 ENDPROC
+ 5360 :
+ 5370 DEFFNtime_button_pressed
+ 5380 tbp%=TIME
+ 5390 PROCsetdoublepointoff:PROCfreq_to_data
+ 5400 REPEAT 
+ 5410 IF TIME-tbp% > 300 THEN data(0)=24:data(1)=16:data(2)=1:data(3)=5:sleeptime%=TIME+90000
+ 5420 IF TIME-tbp% > 500 THEN data(2)=3:data(3)=0:sleeptime%=TIME+180000
+ 5430 IF TIME-tbp% > 700 THEN data(2)=4:data(3)=5:sleeptime%=TIME+270000
+ 5440 IF TIME-tbp% > 900 THEN data(2)=6:data(3)=0:sleeptime%=TIME+360000
+ 5450 IF sleeptime%>8640000 THEN sleeptime%=sleeptime%-8640000 : REM roll over to the next day
+ 5460 PROCshow
+ 5470 UNTIL (FNread_buttons AND &02) = 0
+ 5480 tbp%=TIME-tbp%
+ 5490 =tbp%
+ 5500 ENDFN
+
